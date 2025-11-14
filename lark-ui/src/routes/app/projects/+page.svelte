@@ -1,13 +1,13 @@
 <script lang="ts">
-  import BottomNavigation from '$lib/BottomNavigation.svelte';
   import ProjectCard from '$lib/cards/ProjectCard.svelte';
   import Button from '$lib/Button.svelte';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { env } from '$env/dynamic/public';
   import { checkAuthStatus, getProjects, logout, type Project, type User } from '$lib/auth';
-    import BaseCard from '$lib/cards/BaseCard.svelte';
-    import NewProjectCard from '$lib/cards/NewProjectCard.svelte';
+  import BaseCard from '$lib/cards/BaseCard.svelte';
+  import NewProjectCard from '$lib/cards/NewProjectCard.svelte';
+    import ProgressBar from '$lib/ProgressBar.svelte';
 
   let projects: Project[] = [];
   let loading = true;
@@ -50,6 +50,8 @@
     <Button label="Logout" onclick={handleLogout} color="red" />
   </div>
   
+  <ProgressBar />
+
   {#if loading}
     <div class="loading">
       <img src="/loading/crow_fly.gif" alt="Loading..." />
@@ -85,8 +87,6 @@
       <NewProjectCard />
       </div>  
   {/if}
-  
-  <BottomNavigation />
 </div>
 
 <style>
@@ -101,7 +101,6 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 16px;
   }
 
   .page-title {

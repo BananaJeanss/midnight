@@ -564,6 +564,84 @@ export class UserService {
     return res.json();
   }
 
+  async getTotalNowHackatimeHours(userId: number): Promise<number> {
+    const result = await this.prisma.project.aggregate({
+      where: { userId },
+      _sum: {
+        nowHackatimeHours: true,
+      },
+    });
+    return result._sum.nowHackatimeHours ?? 0;
+  }
+
+  async getTotalApprovedHours(userId: number): Promise<number> {
+    const result = await this.prisma.project.aggregate({
+      where: { userId },
+      _sum: {
+        approvedHours: true,
+      },
+    });
+    return result._sum.approvedHours ?? 0;
+  }
+
+  async recalculateNowHackatimeHours(userId: number): Promise<{ updatedProjects: number; totalNowHackatimeHours: number }> {
+    const user = await this.prisma.user.findUnique({
+      where: { userId },
+      select: {
+        hackatimeAccount: true,
+        projects: {
+          select: {
+            projectId: true,
+            nowHackatimeProjects: true,
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      throw new HttpException(
+        'User not found',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    if (!user.hackatimeAccount) {
+      throw new HttpException(
+        'No Hackatime account linked to this user',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    if (!user.projects || user.projects.length === 0) {
+      return { updatedProjects: 0, totalNowHackatimeHours: 0 };
+    }
+
+    const baseUrl = process.env.HACKATIME_ADMIN_API_URL || 'https://hackatime.hackclub.com/api/admin/v1';
+    const apiKey = process.env.HACKATIME_API_KEY;
+    const { projectsMap } = await this.fetchHackatimeProjectsData(user.hackatimeAccount);
+
+    await Promise.all(
+      user.projects.map(async project => {
+        const projectNames = project.nowHackatimeProjects || [];
+        const totalHours = await this.calculateHackatimeHours(
+          projectNames,
+          projectsMap,
+          user.hackatimeAccount,
+          baseUrl,
+          apiKey,
+        );
+        await this.prisma.project.update({
+          where: { projectId: project.projectId },
+          data: { nowHackatimeHours: totalHours },
+        });
+      }),
+    );
+
+    const totalNowHackatimeHours = await this.getTotalNowHackatimeHours(userId);
+
+    return { updatedProjects: user.projects.length, totalNowHackatimeHours };
+  }
+
   async getLinkedHackatimeProjects(userEmail: string, projectId: number): Promise<any> {
     const allProjects = await this.getAllHackatimeProjects(userEmail);
 
@@ -664,5 +742,145 @@ export class UserService {
     }
 
     return allProjects;
+  }
+
+  private async fetchHackatimeProjectsData(hackatimeAccount: string) {
+    const baseUrl = process.env.HACKATIME_ADMIN_API_URL || 'https://hackatime.hackclub.com/api/admin/v1';
+    const apiKey = process.env.HACKATIME_API_KEY;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(`${baseUrl}/user/projects?id=${hackatimeAccount}`, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!response.ok) {
+      throw new HttpException(
+        'Failed to fetch hackatime projects',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const rawData = await response.json();
+    const projectsMap = new Map<string, number>();
+
+    const addProject = (entry: any) => {
+      if (typeof entry === 'string') {
+        if (!projectsMap.has(entry)) {
+          projectsMap.set(entry, 0);
+        }
+        return;
+      }
+
+      const name = entry?.name || entry?.projectName;
+
+      if (typeof name === 'string') {
+        const duration = typeof entry?.total_duration === 'number' ? entry.total_duration : 0;
+        projectsMap.set(name, duration);
+      }
+    };
+
+    if (Array.isArray(rawData)) {
+      rawData.forEach(addProject);
+    } else if (Array.isArray(rawData?.projects)) {
+      rawData.projects.forEach(addProject);
+    } else if (rawData?.name || rawData?.projectName) {
+      addProject(rawData);
+    }
+
+    return { projectsMap };
+  }
+
+  private async fetchHackatimeProjectDurationsAfterDate(
+    hackatimeAccount: string,
+    projectNames: string[],
+    baseUrl: string,
+    apiKey?: string,
+    cutoffDate: Date = new Date('2025-10-10T00:00:00Z'),
+  ): Promise<Map<string, number>> {
+    const startDate = cutoffDate.toISOString().split('T')[0];
+    const uri = `https://hackatime.hackclub.com/api/v1/users/${hackatimeAccount}/stats?features=projects&start_date=${startDate}`;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const durationsMap = new Map<string, number>();
+
+    for (const projectName of projectNames) {
+      durationsMap.set(projectName, 0);
+    }
+
+    try {
+      const response = await fetch(uri, {
+        method: 'GET',
+        headers,
+      });
+
+      if (response.ok) {
+        const responseData = await response.json();
+        const projects = responseData?.data?.projects;
+        
+        if (projects && Array.isArray(projects)) {
+          for (const project of projects) {
+            const name = project?.name;
+            if (typeof name === 'string' && projectNames.includes(name)) {
+              const duration = typeof project?.total_seconds === 'number' 
+                ? project.total_seconds 
+                : 0;
+              durationsMap.set(name, duration);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching hackatime stats:', error);
+    }
+
+    return durationsMap;
+  }
+
+  private async calculateHackatimeHours(
+    projectNames: string[],
+    projectsMap: Map<string, number>,
+    hackatimeAccount?: string,
+    baseUrl?: string,
+    apiKey?: string,
+  ) {
+    if (hackatimeAccount && baseUrl) {
+      const cutoffDate = new Date('2025-10-10T00:00:00Z');
+      const filteredDurations = await this.fetchHackatimeProjectDurationsAfterDate(
+        hackatimeAccount,
+        projectNames,
+        baseUrl,
+        apiKey,
+        cutoffDate,
+      );
+
+      let totalSeconds = 0;
+      for (const name of projectNames) {
+        totalSeconds += filteredDurations.get(name) || 0;
+      }
+
+      return Math.round((totalSeconds / 3600) * 10) / 10;
+    }
+
+    let totalSeconds = 0;
+    for (const name of projectNames) {
+      totalSeconds += projectsMap.get(name) ?? 0;
+    }
+
+    return Math.round((totalSeconds / 3600) * 10) / 10;
   }
 }

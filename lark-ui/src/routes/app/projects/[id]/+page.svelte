@@ -1,194 +1,100 @@
 <script lang="ts">
-  import BottomNavigation from '$lib/BottomNavigation.svelte';
-  import { onMount } from 'svelte';
-  import { page } from '$app/state';
-  import { goto } from '$app/navigation';
-  import { checkAuthStatus, getProject } from '$lib/auth';
   import type { Project, User } from '$lib/auth';
   import Button from '$lib/Button.svelte';
-  import HackatimeAccountModal from '$lib/hackatime/HackatimeAccountModal.svelte';
-  import HackatimeProjectModal from '$lib/hackatime/HackatimeProjectModal.svelte';
   import ProjectCardPreview from '$lib/cards/ProjectCardPreview.svelte';
+  import { getContext } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { projectPageState } from './state.svelte';
 
-  let loading = $state(true);
-  let error = $state<string | null>(null);
-  let locked = $state(true);
+  const project = projectPageState.project;
 
-  let user = $state<User | null>(null);
-  let project = $state<Project | null>(null);
-
-  let openHackatimeAccountModal = $state(false);
-  let openHackatimeProjectModal = $state(false);
-
-  const projectId = $derived(page.params.id);
+  projectPageState.backpage = '/app/projects';
   
-  async function loadProject() {
-    if (!projectId) return;
-    
-    try {
-      const data = await getProject(projectId);
-      if (data) {
-        project = data;
-        // TODO: Determine if project is locked based on submissions
-        locked = true;
-      } else {
-        error = 'Project not found';
-      }
-      loading = false;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Unknown error';
-      loading = false;
+  let friendlyProjectType = $derived.by(() => {
+    if (!project) return '';
+    switch (project.projectType) {
+      case 'personal_website':
+        return 'Personal Website';
+      case 'terminal_cli':
+        return 'Terminal CLI';
+      case 'desktop_app':
+        return 'Desktop App';
+      case 'platformer_game':
+        return 'Platformer Game';
+      case 'game':
+        return 'Game';
+      case 'mobile_app':
+        return 'Mobile App';
+      case 'wildcard':
+        return 'Wildcard';
+      case 'website':
+        return 'Website';    
     }
-  }
-  
-  function goBack() {
-    goto('/app/projects');
-  }
-  
-  onMount(async () => {
-    user = await checkAuthStatus();
-
-    if (!user) {
-      goto('/');
-      return;
-    }
-
-    await loadProject();
   });
+
+  function openHackatimeProjectModal() {
+    projectPageState.openHackatimeProjectModal = true;
+  }
+  function openHackatimeAccountModal() {
+    projectPageState.openHackatimeAccountModal = true;
+  }
 </script>
 
-<div class="project-page">
-  <div class="back-button">
-    <Button label="← Back to Projects" onclick={goBack} color='black' />
-  </div>
-  
-  {#if loading}
-    <div class="loading">
-      <img src="/loading/crow_fly.gif" alt="Loading..." />
-    </div>
-  {:else if error}
-    <div class="error">Error: {error}</div>
-  {:else if project}
-    <div class="project-overview">
-      <div class="project-card-preview">
-        <ProjectCardPreview title={project.projectTitle} href="#" type={project.projectType} />
-      </div>
-      
-      <div class="project-content">
-        <div class="project-details">
-          <div class="project-heading">
-            <h1 class="project-title">{project.projectTitle}</h1>
-            {#if project.nowHackatimeHours}
-              <h2 class="project-time">2 hours</h2>
-            {/if}
-          </div>
+<div class="project-details">
+      <div class="project-heading">
+        <h1 class="project-title">{projectPageState.project?.projectTitle}</h1>
 
-          <div class="project-tags">
-            <span class="project-tag type">{project.projectType}</span>
-            {#each project.nowHackatimeProjects as hackatimeProjectName}
-              <span class="project-tag">linked to <i>{hackatimeProjectName}</i></span>
-            {/each}
-          </div>
-          
-          <p class="project-description">
-            {project.description}
-          </p>          
+        {#if projectPageState.project?.nowHackatimeHours}
+          <h2 class="project-time">{projectPageState.project.nowHackatimeHours} hours</h2>
+        {/if}
+      </div>
+
+      <div class="project-tags">
+        <span class="project-tag type">{friendlyProjectType}</span>
+        {#each projectPageState.linkedHackatimeProjects as hackatimeProject}
+          <span class="project-tag">linked to <i>{hackatimeProject.name} - {(hackatimeProject.total_duration / 3600).toFixed(1)} hours</i></span>
+        {/each}
+      </div>
+
+      <p class="project-description">
+        {projectPageState.project?.description}
+      </p>
+
+      {#if projectPageState.project?.submissions && projectPageState.project.submissions.length > 0}
+        <div class="submission-progress">
+          <p>Approval Status: {projectPageState.project.submissions[0].approvalStatus}</p>
+          <p>Submitted at {new Date(projectPageState.project.submissions[0].createdAt).toLocaleString()}</p>
         </div>
-
-        {#if user && user.hackatimeAccount}
-          {#if project.nowHackatimeProjects && project.nowHackatimeProjects.length > 0}
-            <div class="submit-section">
-              <Button label="EDIT" icon="edit" color="blue" onclick={() => openHackatimeProjectModal = true}/>
-            </div>
-          {:else}
-            <div class="submit-section">
-              <Button label="LINK HACKATIME Project" icon="link" color="blue" onclick={() => openHackatimeProjectModal = true}/>
-            </div>
-          {/if}
-        {:else}
-          <div class="submit-section">
-            <Button label="LINK HACKATIME Account" icon="link" onclick={() => openHackatimeAccountModal = true}/>
-            <img alt="required!" src="/handdrawn_text/required.png" style="width: 140px;" />
-          </div>
-        {/if}       
-      </div>
-    </div>
-  {/if}
-
-  {#if openHackatimeAccountModal}
-    <HackatimeAccountModal onClose={async () => {
-      user = await checkAuthStatus();
-      openHackatimeAccountModal = false;
-    }} />
-  {/if}
-
-  {#if openHackatimeProjectModal && project}
-    <HackatimeProjectModal 
-      onClose={async () => {
-        await loadProject();
-        openHackatimeProjectModal = false;
-      }} 
-      projectId={project.projectId} 
-    />
-  {/if}
-
-  <BottomNavigation />
+      {/if}
 </div>
 
+{#if projectPageState.user && projectPageState.user.hackatimeAccount}
+      {#if projectPageState.project?.submissions && projectPageState.project.submissions.length > 0}
+        <div class="submit-section">
+          <Button
+            label="Submiited"
+            disabled
+          />
+        </div>
+      {:else if projectPageState.project?.nowHackatimeProjects && projectPageState.project.nowHackatimeProjects.length > 0}
+        <div class="submit-section">
+          <Button label="EDIT" icon="edit" color="blue" onclick={() => goto(`/app/projects/${projectPageState.project?.projectId}/edit`)}/>
+          <Button label="Submit" onclick={() => goto(`/app/projects/${projectPageState.project?.projectId}/submit`)}/>
+        </div>
+      {:else}
+        <div class="submit-section-inital">
+          <Button label="LINK HACKATIME Project" icon="link" color="blue" onclick={openHackatimeProjectModal}/>
+          <img alt="required!" src="/handdrawn_text/required.png" style="width: 140px;" />
+        </div>
+      {/if}
+{:else}
+  <div class="submit-section-inital">
+    <Button label="LINK HACKATIME Account" icon="link" onclick={openHackatimeAccountModal}/>
+    <img alt="required!" src="/handdrawn_text/required.png" style="width: 140px;" />
+  </div>
+{/if}
+
 <style>
-  .project-page {
-    position: relative;
-    min-height: 100vh;
-    background: #453b61;
-    padding: 57px 50px 200px;
-  }
-
-  .back-button {
-    margin-bottom: 30px;
-  }
-
-  .loading {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100vh;
-  }
-
-  .loading img {
-    image-rendering: pixelated;
-    width: 250px;
-    height: auto;
-  }
-
-  .error {
-    font-family: 'PT Sans', sans-serif;
-    font-size: 24px;
-    color: #f24b4b;
-    text-align: center;
-    padding: 60px 20px;
-  }
-
-  .project-overview {
-    display: flex;
-    gap: 48px;
-  }
-
-  .project-card-preview {
-    width: 367px;
-    height: 546px;
-    flex-shrink: 0;
-  }
-
-  .project-content {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-  }
-
   .project-details {
     flex: 1;
   }
@@ -244,6 +150,7 @@
     line-height: 1.5;
     margin: 0 0 50px 0;
     max-width: 646px;
+    max-height: 160px;
   }
 
   .submit-section {
@@ -252,7 +159,23 @@
     display: flex;
     flex-direction: row;
     align-items: end;
+    gap: 20px;
+  }
+
+  .submit-section-inital {
+    position: relative;
+    
+    display: flex;
+    flex-direction: row;
+    align-items: end;
     gap: 4px;
+  }
+
+  .submission-progress {
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    border-radius: 4px;
   }
 
   @media (max-width: 1024px) {
@@ -269,15 +192,6 @@
   }
 
   @media (max-width: 768px) {
-    .project-page {
-      padding: 30px 20px 200px;
-    }
-
-    .back-button {
-      font-size: 16px;
-      padding: 8px 16px;
-    }
-
     .project-title {
       font-size: 60px;
     }
