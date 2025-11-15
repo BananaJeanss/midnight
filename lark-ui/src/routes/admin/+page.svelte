@@ -79,12 +79,15 @@ type AdminMetrics = {
 };
 
 	type Tab = 'submissions' | 'projects' | 'users';
+	type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
 
 	let { data }: { data: PageData } = $props();
 
 const toSubmissionDraft = (submission: AdminSubmission) => ({
 	approvalStatus: submission.approvalStatus,
-	approvedHours: submission.approvedHours !== null ? submission.approvedHours.toString() : '',
+	approvedHours: submission.approvedHours !== null 
+		? submission.approvedHours.toString() 
+		: (submission.project.nowHackatimeHours !== null ? submission.project.nowHackatimeHours.toFixed(1) : ''),
 	hoursJustification: submission.hoursJustification ?? ''
 });
 
@@ -113,6 +116,8 @@ let submissionsLoaded = $state((data.submissions?.length ?? 0) > 0);
 let projectsLoaded = $state((data.projects?.length ?? 0) > 0);
 let usersLoaded = $state((data.users?.length ?? 0) > 0);
 
+let statusFilter = $state<StatusFilter>('all');
+
 const statusIdFor = (submissionId: number) => `submission-${submissionId}-status`;
 const hoursIdFor = (submissionId: number) => `submission-${submissionId}-hours`;
 const justificationIdFor = (submissionId: number) => `submission-${submissionId}-justification`;
@@ -131,6 +136,8 @@ let submissionDrafts = $state<Record<number, { approvalStatus: string; approvedH
 let submissionSaving = $state<Record<number, boolean>>({});
 let submissionErrors = $state<Record<number, string>>({});
 let submissionSuccess = $state<Record<number, string>>({});
+let submissionRecalculating = $state<Record<number, boolean>>({});
+let addressExpanded = $state<Record<number, boolean>>({});
 
 let projectBusy = $state<Record<number, boolean>>({});
 let projectErrors = $state<Record<number, string>>({});
@@ -176,7 +183,7 @@ function formatCount(value: number) {
 	return value.toLocaleString();
 }
 
-	async function loadSubmissions() {
+	async function loadSubmissions(autoRecalculate = false) {
 		submissionsLoading = true;
 		try {
 			const response = await fetch(`${apiUrl}/api/admin/submissions`, {
@@ -189,6 +196,13 @@ function formatCount(value: number) {
 				submissionErrors = {};
 				submissionSuccess = {};
 				submissionsLoaded = true;
+
+				if (autoRecalculate) {
+					const pendingSubmissions = next.filter(s => s.approvalStatus === 'pending');
+					for (const submission of pendingSubmissions) {
+						recalculateSubmissionHours(submission.submissionId, submission.project.projectId);
+					}
+				}
 			}
 		} finally {
 			submissionsLoading = false;
@@ -323,6 +337,77 @@ async function recalculateAllProjectsHours() {
 		}
 	}
 
+	async function quickApprove(submission: AdminSubmission) {
+		submissionSaving = { ...submissionSaving, [submission.submissionId]: true };
+		submissionErrors = { ...submissionErrors, [submission.submissionId]: '' };
+		submissionSuccess = { ...submissionSuccess, [submission.submissionId]: '' };
+
+		const draft = submissionDrafts[submission.submissionId];
+		const hoursJustification = draft?.hoursJustification || '';
+
+		try {
+			const response = await fetch(`${apiUrl}/api/admin/submissions/${submission.submissionId}/quick-approve`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ hoursJustification }),
+			});
+
+			if (!response.ok) {
+				const { message } = await response.json().catch(() => ({ message: 'Failed to quick approve submission' }));
+				submissionErrors = { ...submissionErrors, [submission.submissionId]: message ?? 'Failed to quick approve submission' };
+				return;
+			}
+
+			submissionSuccess = { ...submissionSuccess, [submission.submissionId]: 'Submission quick approved and synced to Airtable' };
+			await loadSubmissions();
+			await loadProjects();
+			await loadMetrics();
+		} catch (err) {
+			submissionErrors = {
+				...submissionErrors,
+				[submission.submissionId]: err instanceof Error ? err.message : 'Failed to quick approve submission',
+			};
+		} finally {
+			submissionSaving = { ...submissionSaving, [submission.submissionId]: false };
+		}
+	}
+
+	async function quickDeny(submissionId: number) {
+		submissionDrafts[submissionId] = {
+			...submissionDrafts[submissionId],
+			approvalStatus: 'rejected',
+			approvedHours: '0',
+		};
+		await saveSubmission(submissionId);
+	}
+
+	async function recalculateSubmissionHours(submissionId: number, projectId: number) {
+		submissionRecalculating = { ...submissionRecalculating, [submissionId]: true };
+
+		try {
+			const response = await fetch(`${apiUrl}/api/admin/projects/${projectId}/recalculate`, {
+				method: 'POST',
+				credentials: 'include',
+			});
+
+			if (response.ok) {
+				await loadSubmissions();
+				const updatedSubmission = submissions.find(s => s.submissionId === submissionId);
+				if (updatedSubmission) {
+					submissionDrafts[submissionId] = {
+						...submissionDrafts[submissionId],
+						approvedHours: updatedSubmission.project.nowHackatimeHours?.toFixed(1) ?? ''
+					};
+				}
+			}
+		} catch (err) {
+			console.error('Failed to recalculate hours:', err);
+		} finally {
+			submissionRecalculating = { ...submissionRecalculating, [submissionId]: false };
+		}
+	}
+
 	async function recalculateProject(projectId: number) {
 		projectBusy = { ...projectBusy, [projectId]: true };
 		projectErrors = { ...projectErrors, [projectId]: '' };
@@ -395,7 +480,7 @@ async function recalculateAllProjectsHours() {
 	async function showSubmissionsTab() {
 		activeTab = 'submissions';
 		if (!submissionsLoaded && !submissionsLoading) {
-			await loadSubmissions();
+			await loadSubmissions(true);
 		}
 	}
 
@@ -445,6 +530,19 @@ $effect(() => {
 	if (users.length > 0) {
 		usersLoaded = true;
 	}
+});
+
+let filteredSubmissions = $derived(
+	statusFilter === 'all'
+		? submissions
+		: submissions.filter((s) => s.approvalStatus === statusFilter)
+);
+
+let statusCounts = $derived({
+	all: submissions.length,
+	pending: submissions.filter((s) => s.approvalStatus === 'pending').length,
+	approved: submissions.filter((s) => s.approvalStatus === 'approved').length,
+	rejected: submissions.filter((s) => s.approvalStatus === 'rejected').length,
 });
 </script>
 
@@ -528,139 +626,281 @@ $effect(() => {
 
 		{#if activeTab === 'submissions'}
 			<section class="space-y-4">
-				<div class="flex items-center justify-between">
-					<h2 class="text-2xl font-semibold">Submissions</h2>
+				<div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+					<h2 class="text-2xl font-semibold">Submission Review Platform</h2>
 					<button
 						class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg border border-gray-700 transition-colors"
-						onclick={loadSubmissions}
+						onclick={() => loadSubmissions(false)}
 					>
 						Refresh
 					</button>
 				</div>
 
+				<div class="flex flex-wrap gap-2">
+					<button
+						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'all' ? 'bg-purple-600 border-purple-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
+						onclick={() => statusFilter = 'all'}
+					>
+						All ({statusCounts.all})
+					</button>
+					<button
+						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'pending' ? 'bg-yellow-600 border-yellow-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
+						onclick={() => statusFilter = 'pending'}
+					>
+						Pending ({statusCounts.pending})
+					</button>
+					<button
+						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'approved' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
+						onclick={() => statusFilter = 'approved'}
+					>
+						Approved ({statusCounts.approved})
+					</button>
+					<button
+						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'rejected' ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
+						onclick={() => statusFilter = 'rejected'}
+					>
+						Rejected ({statusCounts.rejected})
+					</button>
+				</div>
+
 				{#if submissionsLoading}
 					<div class="py-12 text-center text-gray-300">Loading submissions...</div>
-				{:else if submissions.length === 0}
-					<div class="py-12 text-center text-gray-300">No submissions available.</div>
+				{:else if filteredSubmissions.length === 0}
+					<div class="py-12 text-center text-gray-300">
+						{statusFilter === 'all' ? 'No submissions available.' : `No ${statusFilter} submissions.`}
+					</div>
 				{:else}
 					<div class="grid gap-6">
-						{#each submissions as submission (submission.submissionId)}
+						{#each filteredSubmissions as submission (submission.submissionId)}
 							<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-4">
+								<div class="flex flex-col gap-4 md:flex-row md:gap-6">
+									{#if submission.project.screenshotUrl}
+										<div class="w-full md:w-64 flex-shrink-0">
+											<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400 mb-2">Screenshot Preview</h4>
+											<a href={submission.project.screenshotUrl} target="_blank" rel="noreferrer">
+												<img 
+													src={submission.project.screenshotUrl} 
+													alt="Project screenshot" 
+													class="w-full h-48 object-cover rounded-lg border border-gray-700 hover:border-purple-500 transition-colors cursor-pointer"
+												/>
+											</a>
+										</div>
+									{/if}
 
-								<div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-									<div>
-										<h3 class="text-xl font-semibold">{submission.project.projectTitle}</h3>
-										<p class="text-sm text-gray-400">Submitted {formatDate(submission.createdAt)}</p>
-									</div>
-									<div class="flex items-center gap-2">
-										<span
-											class={`px-3 py-1 rounded-full text-sm border ${
-												submission.approvalStatus === 'approved'
-													? 'bg-green-500/20 border-green-400 text-green-300'
-													: submission.approvalStatus === 'rejected'
-													? 'bg-red-500/20 border-red-400 text-red-300'
-													: 'bg-yellow-500/20 border-yellow-400 text-yellow-200'
-											}`}
-										>
-											{submission.approvalStatus.toUpperCase()}
-										</span>
-										<span class="text-sm text-gray-300">
-											Approved hours: {formatHours(submission.approvedHours)}
-										</span>
+									<div class="flex-1 space-y-4">
+										<div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+											<div>
+												<h3 class="text-2xl font-semibold">{submission.project.projectTitle}</h3>
+												<p class="text-sm text-gray-400">Submitted {formatDate(submission.createdAt)}</p>
+											</div>
+											<span
+												class={`px-3 py-1 rounded-full text-sm border self-start ${
+													submission.approvalStatus === 'approved'
+														? 'bg-green-500/20 border-green-400 text-green-300'
+														: submission.approvalStatus === 'rejected'
+														? 'bg-red-500/20 border-red-400 text-red-300'
+														: 'bg-yellow-500/20 border-yellow-400 text-yellow-200'
+												}`}
+											>
+												{submission.approvalStatus.toUpperCase()}
+											</span>
+										</div>
+
+										<div class="grid gap-4 md:grid-cols-2">
+											<div class="space-y-2">
+												<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">User Info</h4>
+												<p class="text-lg font-medium">{fullName(submission.project.user)}</p>
+												<p class="text-sm text-gray-300">{submission.project.user.email}</p>
+												{#if submission.project.user.hackatimeAccount}
+													<p class="text-sm text-purple-300">
+														🕐 Hackatime: <span class="font-mono">{submission.project.user.hackatimeAccount}</span>
+													</p>
+												{/if}
+												<p class="text-sm text-gray-400">
+													{submission.project.user.city ? `${submission.project.user.city}, ` : ''}{submission.project.user.state}
+												</p>
+												<button
+													class="text-xs text-left text-blue-400 hover:text-blue-300 transition-colors"
+													onclick={() => addressExpanded[submission.submissionId] = !addressExpanded[submission.submissionId]}
+												>
+													{addressExpanded[submission.submissionId] ? '▼' : '▶'} Full Address
+												</button>
+												{#if addressExpanded[submission.submissionId]}
+													<div class="mt-2 p-3 bg-gray-800/50 rounded-lg border border-gray-700 text-xs text-gray-300 space-y-1">
+														{#if submission.project.user.addressLine1}
+															<p>{submission.project.user.addressLine1}</p>
+														{/if}
+														{#if submission.project.user.addressLine2}
+															<p>{submission.project.user.addressLine2}</p>
+														{/if}
+														<p>
+															{[submission.project.user.city, submission.project.user.state, submission.project.user.zipCode].filter(Boolean).join(', ')}
+														</p>
+														{#if submission.project.user.country}
+															<p>{submission.project.user.country}</p>
+														{/if}
+														{#if submission.project.user.birthday}
+															<p class="pt-2 border-t border-gray-700">Birthday: {formatDate(submission.project.user.birthday)}</p>
+														{/if}
+													</div>
+												{/if}
+											</div>
+											<div class="space-y-2">
+												<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Project Info</h4>
+												<div class="flex items-center gap-2">
+													<p class="text-sm text-gray-300">
+														Hackatime hours: <span class="font-semibold text-purple-300">{formatHours(submission.project.nowHackatimeHours)}</span>
+													</p>
+													<button
+														class="px-2 py-1 text-xs rounded bg-purple-700 hover:bg-purple-600 border border-purple-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+														onclick={() => recalculateSubmissionHours(submission.submissionId, submission.project.projectId)}
+														disabled={submissionRecalculating[submission.submissionId]}
+													>
+														{submissionRecalculating[submission.submissionId] ? '⟳ Calculating...' : '⟳ Recalc'}
+													</button>
+												</div>
+												{#if submission.project.nowHackatimeProjects?.length}
+													<p class="text-sm text-gray-400">
+														Projects: {submission.project.nowHackatimeProjects.join(', ')}
+													</p>
+												{/if}
+												{#if submission.approvedHours !== null}
+													<p class="text-sm text-green-300">
+														Approved hours: <span class="font-semibold">{formatHours(submission.approvedHours)}</span>
+													</p>
+												{/if}
+											</div>
+										</div>
+
+										{#if submission.project.description}
+											<div class="space-y-2">
+												<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Description</h4>
+												<p class="text-sm text-gray-300">{submission.project.description}</p>
+											</div>
+										{/if}
+
+										{#if submission.hoursJustification}
+											<div class="space-y-2 bg-blue-950/30 border border-blue-800 rounded-lg p-4">
+												<h4 class="text-sm font-semibold uppercase tracking-wide text-blue-300">Hours Justification</h4>
+												<p class="text-sm text-gray-300">{submission.hoursJustification}</p>
+											</div>
+										{/if}
+
+										<div class="flex flex-wrap gap-2">
+											<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400 w-full">Quick Actions</h4>
+											{#if submission.project.playableUrl}
+												<a 
+													href={submission.project.playableUrl} 
+													target="_blank" 
+													rel="noreferrer"
+													class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 border border-blue-400 text-white text-sm transition-colors"
+												>
+													🎮 View Live Demo
+												</a>
+											{/if}
+											{#if submission.project.repoUrl}
+												<a 
+													href={submission.project.repoUrl} 
+													target="_blank" 
+													rel="noreferrer"
+													class="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 border border-gray-500 text-white text-sm transition-colors"
+												>
+													💻 View Repository
+												</a>
+											{/if}
+											{#if submission.project.screenshotUrl}
+												<a 
+													href={submission.project.screenshotUrl} 
+													target="_blank" 
+													rel="noreferrer"
+													class="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 border border-purple-500 text-white text-sm transition-colors"
+												>
+													📸 Full Screenshot
+												</a>
+											{/if}
+										</div>
 									</div>
 								</div>
 
-						<div class="grid gap-4 md:grid-cols-3">
-									<div class="space-y-2">
-										<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">User</h4>
-										<p class="text-lg">{fullName(submission.project.user)}</p>
-										<p class="text-sm text-gray-300">{submission.project.user.email}</p>
-										<p class="text-sm text-gray-400">
-											{submission.project.user.city ? `${submission.project.user.city}, ` : ''}{submission.project.user.state}
-										</p>
+								<div class="border-t border-gray-700 pt-4 space-y-4">
+									<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Review Controls</h4>
+									
+									<div class="grid gap-4 md:grid-cols-3">
+										<div class="space-y-2">
+											<label class="text-sm font-medium text-gray-300" for={statusIdFor(submission.submissionId)}>Status</label>
+											<select
+												id={statusIdFor(submission.submissionId)}
+												class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+												bind:value={submissionDrafts[submission.submissionId].approvalStatus}
+											>
+												{#each statusOptions as option}
+													<option value={option}>{option}</option>
+												{/each}
+											</select>
+										</div>
+										<div class="space-y-2">
+											<label class="text-sm font-medium text-gray-300" for={hoursIdFor(submission.submissionId)}>Approved Hours</label>
+											<input
+												id={hoursIdFor(submission.submissionId)}
+												type="number"
+												step="0.1"
+												min="0"
+												class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+												bind:value={submissionDrafts[submission.submissionId].approvedHours}
+											/>
+										</div>
+										<div class="space-y-2">
+											<label class="text-sm font-medium text-gray-300" for={justificationIdFor(submission.submissionId)}>Hours Justification</label>
+											<textarea
+												id={justificationIdFor(submission.submissionId)}
+												class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+												rows="2"
+												placeholder="Explain the approved hours..."
+												bind:value={submissionDrafts[submission.submissionId].hoursJustification}></textarea>
+										</div>
 									</div>
-									<div class="space-y-2">
-										<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Project</h4>
-										<p class="text-sm text-gray-300 line-clamp-3">{submission.project.description}</p>
-										{#if submission.project.nowHackatimeProjects?.length}
-											<p class="text-sm text-gray-400">
-												{submission.project.nowHackatimeProjects.join(', ')}
-											</p>
-										{/if}
-										<p class="text-sm text-gray-400">
-											Hackatime hours: {formatHours(submission.project.nowHackatimeHours)}
-										</p>
-									</div>
-									<div class="space-y-2">
-										<h4 class="text-sm font-semibold uppercase tracking-wide text-gray-400">Links</h4>
-										{#if submission.project.playableUrl}
-											<a class="text-purple-300 hover:text-purple-200 text-sm break-words" href={submission.project.playableUrl} target="_blank" rel="noreferrer">Playable</a>
-										{/if}
-										{#if submission.project.repoUrl}
-											<a class="text-purple-300 hover:text-purple-200 text-sm break-words" href={submission.project.repoUrl} target="_blank" rel="noreferrer">Repository</a>
-										{/if}
-										{#if submission.project.screenshotUrl}
-											<a class="text-purple-300 hover:text-purple-200 text-sm break-words" href={submission.project.screenshotUrl} target="_blank" rel="noreferrer">Screenshot</a>
-										{/if}
-									</div>
-								</div>
 
-								<div class="grid gap-4 md:grid-cols-3">
-									<div class="space-y-2">
-								<label class="text-sm font-medium text-gray-300" for={statusIdFor(submission.submissionId)}>Status</label>
-										<select
-									id={statusIdFor(submission.submissionId)}
-											class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-											bind:value={submissionDrafts[submission.submissionId].approvalStatus}
-										>
-											{#each statusOptions as option}
-												<option value={option}>{option}</option>
-											{/each}
-										</select>
-									</div>
-									<div class="space-y-2">
-								<label class="text-sm font-medium text-gray-300" for={hoursIdFor(submission.submissionId)}>Approved hours</label>
-										<input
-									id={hoursIdFor(submission.submissionId)}
-											type="number"
-											step="0.1"
-											min="0"
-											class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-											bind:value={submissionDrafts[submission.submissionId].approvedHours}
-										/>
-									</div>
-									<div class="space-y-2">
-								<label class="text-sm font-medium text-gray-300" for={justificationIdFor(submission.submissionId)}>Hours justification</label>
-										<textarea
-									id={justificationIdFor(submission.submissionId)}
-											class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-											rows="2"
-											bind:value={submissionDrafts[submission.submissionId].hoursJustification}></textarea>
-									</div>
-								</div>
-
-								<div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-									<div class="flex gap-3">
-										<button
-											class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 transition-colors disabled:bg-gray-700 disabled:cursor-not-allowed"
-											onclick={() => saveSubmission(submission.submissionId)}
-											disabled={submissionSaving[submission.submissionId]}
-										>
-											{submissionSaving[submission.submissionId] ? 'Saving...' : 'Save changes'}
-										</button>
-										<button
-											class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors"
-											onclick={() => setSubmissionDraft(submission, true)}
-										>
-											Reset fields
-										</button>
-									</div>
-									<div class="text-sm">
-										{#if submissionErrors[submission.submissionId]}
-											<span class="text-red-400">{submissionErrors[submission.submissionId]}</span>
-										{:else if submissionSuccess[submission.submissionId]}
-											<span class="text-green-400">{submissionSuccess[submission.submissionId]}</span>
-										{/if}
+									<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+										<div class="flex flex-wrap gap-2">
+											{#if submission.approvalStatus !== 'approved'}
+												<button
+													class="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-500 border border-green-400 transition-colors disabled:bg-gray-700 disabled:cursor-not-allowed"
+													onclick={() => quickApprove(submission)}
+													disabled={submissionSaving[submission.submissionId]}
+												>
+													✓ Quick Approve
+												</button>
+											{/if}
+											{#if submission.approvalStatus !== 'rejected'}
+												<button
+													class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 border border-red-400 transition-colors disabled:bg-gray-700 disabled:cursor-not-allowed"
+													onclick={() => quickDeny(submission.submissionId)}
+													disabled={submissionSaving[submission.submissionId]}
+												>
+													✕ Quick Deny
+												</button>
+											{/if}
+											<button
+												class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 transition-colors disabled:bg-gray-700 disabled:cursor-not-allowed"
+												onclick={() => saveSubmission(submission.submissionId)}
+												disabled={submissionSaving[submission.submissionId]}
+											>
+												{submissionSaving[submission.submissionId] ? 'Saving...' : '💾 Save Changes'}
+											</button>
+											<button
+												class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors"
+												onclick={() => setSubmissionDraft(submission, true)}
+											>
+												↺ Reset
+											</button>
+										</div>
+										<div class="text-sm">
+											{#if submissionErrors[submission.submissionId]}
+												<span class="text-red-400">{submissionErrors[submission.submissionId]}</span>
+											{:else if submissionSuccess[submission.submissionId]}
+												<span class="text-green-400">{submissionSuccess[submission.submissionId]}</span>
+											{/if}
+										</div>
 									</div>
 								</div>
 							</div>

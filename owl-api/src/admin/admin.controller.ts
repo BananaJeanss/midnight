@@ -37,6 +37,17 @@ export class AdminController {
     return this.adminService.updateSubmission(id, updateSubmissionDto, req.user.userId);
   }
 
+  @Post('submissions/:id/quick-approve')
+  @UseGuards(RolesGuard)
+  @Roles(Role.Admin)
+  async quickApproveSubmission(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { hoursJustification?: string },
+    @Req() req: Request,
+  ) {
+    return this.adminService.quickApproveSubmission(id, req.user.userId, body.hoursJustification);
+  }
+
   @Put('projects/:id/unlock')
   @UseGuards(RolesGuard)
   @Roles(Role.Admin)

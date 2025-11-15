@@ -180,6 +180,117 @@ export class AdminService {
     return updatedSubmission;
   }
 
+  async quickApproveSubmission(submissionId: number, adminUserId: number, providedJustification?: string) {
+    const submission = await this.prisma.submission.findUnique({
+      where: { submissionId },
+      include: {
+        project: {
+          include: {
+            user: true,
+          },
+        },
+      },
+    });
+
+    if (!submission) {
+      throw new NotFoundException('Submission not found');
+    }
+
+    const hackatimeHours = submission.project.nowHackatimeHours || 0;
+    const autoJustification = `Quick approved with ${hackatimeHours.toFixed(1)} Hackatime hours tracked on Midnight project.`;
+    const hoursJustification = providedJustification || submission.hoursJustification || autoJustification;
+
+    const updateData: any = {
+      approvalStatus: 'approved',
+      approvedHours: hackatimeHours,
+      hoursJustification: hoursJustification,
+      reviewedBy: adminUserId.toString(),
+      reviewedAt: new Date(),
+    };
+
+    const updatedSubmission = await this.prisma.submission.update({
+      where: { submissionId },
+      data: updateData,
+      include: {
+        project: {
+          include: {
+            user: {
+              select: {
+                userId: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await this.prisma.project.update({
+      where: { projectId: submission.projectId },
+      data: {
+        approvedHours: hackatimeHours,
+        hoursJustification: hoursJustification,
+      },
+    });
+
+    try {
+      // Prioritize project.repoUrl over submission.repoUrl to ensure we get the GitHub URL
+      // submission.repoUrl might contain playable URLs incorrectly
+      const repoUrl = submission.project.repoUrl || submission.repoUrl || '';
+      const playableUrl = submission.playableUrl || submission.project.playableUrl || '';
+      
+      console.log('Admin service - submission.repoUrl:', submission.repoUrl);
+      console.log('Admin service - submission.project.repoUrl:', submission.project.repoUrl);
+      console.log('Admin service - final repoUrl being passed:', repoUrl);
+      console.log('Admin service - playableUrl being passed:', playableUrl);
+      
+      const approvedProjectData = {
+        user: {
+          firstName: submission.project.user.firstName,
+          lastName: submission.project.user.lastName,
+          email: submission.project.user.email,
+          birthday: submission.project.user.birthday,
+          addressLine1: submission.project.user.addressLine1,
+          addressLine2: submission.project.user.addressLine2,
+          city: submission.project.user.city,
+          state: submission.project.user.state,
+          country: submission.project.user.country,
+          zipCode: submission.project.user.zipCode,
+        },
+        project: {
+          playableUrl: playableUrl,
+          repoUrl: repoUrl,
+          screenshotUrl: submission.screenshotUrl || submission.project.screenshotUrl || '',
+          approvedHours: hackatimeHours,
+          hoursJustification: hoursJustification,
+          description: submission.project.description || submission.description || undefined,
+        },
+      };
+
+      const airtableResult = await this.airtableService.createApprovedProject(approvedProjectData);
+
+      if (!submission.project.user.airtableRecId) {
+        await this.prisma.user.update({
+          where: { userId: submission.project.userId },
+          data: { airtableRecId: airtableResult.recordId },
+        });
+      }
+
+      if (!submission.project.airtableRecId) {
+        await this.prisma.project.update({
+          where: { projectId: submission.projectId },
+          data: { airtableRecId: airtableResult.recordId },
+        });
+      }
+    } catch (error) {
+      console.error('Error creating Approved Projects record in Airtable:', error);
+    }
+
+    return updatedSubmission;
+  }
+
   async getAllEditRequests() {
     const editRequests = await this.prisma.editRequest.findMany({
       include: {
