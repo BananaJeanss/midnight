@@ -32,6 +32,7 @@
 		project: {
 			projectId: number;
 			projectTitle: string;
+			projectType: string;
 			description: string | null;
 			playableUrl: string | null;
 			repoUrl: string | null;
@@ -76,10 +77,16 @@ type AdminMetrics = {
 	totalApprovedHours: number;
 	totalUsers: number;
 	totalProjects: number;
+	totalSubmittedHackatimeHours: number;
 };
 
 	type Tab = 'submissions' | 'projects' | 'users';
 	type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
+	type SortField = 'createdAt' | 'projectTitle' | 'userName' | 'approvalStatus' | 'nowHackatimeHours' | 'approvedHours';
+	type SortDirection = 'asc' | 'desc';
+
+	const projectTypes = ['personal_website', 'platformer_game', 'website', 'game', 'terminal_cli', 'desktop_app', 'mobile_app', 'wildcard'] as const;
+	const statusOptions = ['pending', 'approved', 'rejected'] as const;
 
 	let { data }: { data: PageData } = $props();
 
@@ -109,6 +116,7 @@ let metrics = $state<AdminMetrics>(
 		totalApprovedHours: 0,
 		totalUsers: 0,
 		totalProjects: 0,
+		totalSubmittedHackatimeHours: 0,
 	}
 );
 
@@ -116,14 +124,64 @@ let submissionsLoaded = $state((data.submissions?.length ?? 0) > 0);
 let projectsLoaded = $state((data.projects?.length ?? 0) > 0);
 let usersLoaded = $state((data.users?.length ?? 0) > 0);
 
-let statusFilter = $state<StatusFilter>('all');
+let searchQuery = $state('');
+let selectedStatuses = $state<Set<string>>(new Set());
+let selectedProjectTypes = $state<Set<string>>(new Set());
+let sortField = $state<SortField>('createdAt');
+let sortDirection = $state<SortDirection>('desc');
+
+function getDefaultDateRange() {
+	const today = new Date();
+	const defaultStart = new Date('2025-10-10');
+	return {
+		startDate: defaultStart.toISOString().split('T')[0],
+		endDate: today.toISOString().split('T')[0],
+	};
+}
+
+function loadDateRangeFromStorage() {
+	if (typeof window === 'undefined') return getDefaultDateRange();
+	const stored = localStorage.getItem('admin-submissions-date-range');
+	if (stored) {
+		try {
+			const parsed = JSON.parse(stored);
+			return {
+				startDate: parsed.startDate || getDefaultDateRange().startDate,
+				endDate: parsed.endDate || getDefaultDateRange().endDate,
+			};
+		} catch {
+			return getDefaultDateRange();
+		}
+	}
+	return getDefaultDateRange();
+}
+
+function saveDateRangeToStorage(startDate: string, endDate: string) {
+	if (typeof window !== 'undefined') {
+		localStorage.setItem('admin-submissions-date-range', JSON.stringify({ startDate, endDate }));
+	}
+}
+
+const defaultDateRange = loadDateRangeFromStorage();
+let dateRangeStart = $state(defaultDateRange.startDate);
+let dateRangeEnd = $state(defaultDateRange.endDate);
+
+$effect(() => {
+	saveDateRangeToStorage(dateRangeStart, dateRangeEnd);
+});
+
+function generateBillyLink(hackatimeAccount: string | null): string | null {
+	if (!hackatimeAccount || hackatimeAccount.trim() === '') return null;
+	const start = dateRangeStart || getDefaultDateRange().startDate;
+	const end = dateRangeEnd || getDefaultDateRange().endDate;
+	return `https://billy.3kh0.net/?u=${hackatimeAccount}&d=${start}-${end}`;
+}
 
 const statusIdFor = (submissionId: number) => `submission-${submissionId}-status`;
 const hoursIdFor = (submissionId: number) => `submission-${submissionId}-hours`;
 const justificationIdFor = (submissionId: number) => `submission-${submissionId}-justification`;
 
 const apiUrl = data.apiUrl;
-const statusOptions = ['pending', 'approved', 'rejected'];
 
 let submissionsLoading = $state(false);
 let projectsLoading = $state(false);
@@ -532,10 +590,65 @@ $effect(() => {
 	}
 });
 
+function matchesSearch(submission: AdminSubmission, query: string): boolean {
+	if (!query.trim()) return true;
+	const lowerQuery = query.toLowerCase();
+	const fullName = `${submission.project.user.firstName ?? ''} ${submission.project.user.lastName ?? ''}`.trim().toLowerCase();
+	return (
+		submission.project.projectTitle.toLowerCase().includes(lowerQuery) ||
+		fullName.includes(lowerQuery) ||
+		submission.project.user.email.toLowerCase().includes(lowerQuery) ||
+		(submission.project.description?.toLowerCase().includes(lowerQuery) ?? false) ||
+		(submission.description?.toLowerCase().includes(lowerQuery) ?? false)
+	);
+}
+
+function matchesStatusFilters(submission: AdminSubmission): boolean {
+	if (selectedStatuses.size === 0) return true;
+	return selectedStatuses.has(submission.approvalStatus);
+}
+
+function matchesProjectTypeFilters(submission: AdminSubmission): boolean {
+	if (selectedProjectTypes.size === 0) return true;
+	return selectedProjectTypes.has(submission.project.projectType);
+}
+
+function compareSubmissions(a: AdminSubmission, b: AdminSubmission): number {
+	let comparison = 0;
+	
+	switch (sortField) {
+		case 'createdAt':
+			comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+			break;
+		case 'projectTitle':
+			comparison = a.project.projectTitle.localeCompare(b.project.projectTitle);
+			break;
+		case 'userName': {
+			const nameA = `${a.project.user.firstName ?? ''} ${a.project.user.lastName ?? ''}`.trim();
+			const nameB = `${b.project.user.firstName ?? ''} ${b.project.user.lastName ?? ''}`.trim();
+			comparison = nameA.localeCompare(nameB);
+			break;
+		}
+		case 'approvalStatus':
+			comparison = a.approvalStatus.localeCompare(b.approvalStatus);
+			break;
+		case 'nowHackatimeHours':
+			comparison = (a.project.nowHackatimeHours ?? 0) - (b.project.nowHackatimeHours ?? 0);
+			break;
+		case 'approvedHours':
+			comparison = (a.approvedHours ?? 0) - (b.approvedHours ?? 0);
+			break;
+	}
+	
+	return sortDirection === 'asc' ? comparison : -comparison;
+}
+
 let filteredSubmissions = $derived(
-	statusFilter === 'all'
-		? submissions
-		: submissions.filter((s) => s.approvalStatus === statusFilter)
+	submissions
+		.filter((s) => matchesSearch(s, searchQuery))
+		.filter((s) => matchesStatusFilters(s))
+		.filter((s) => matchesProjectTypeFilters(s))
+		.sort(compareSubmissions)
 );
 
 let statusCounts = $derived({
@@ -544,13 +657,37 @@ let statusCounts = $derived({
 	approved: submissions.filter((s) => s.approvalStatus === 'approved').length,
 	rejected: submissions.filter((s) => s.approvalStatus === 'rejected').length,
 });
+
+function toggleStatus(status: string) {
+	const newSet = new Set(selectedStatuses);
+	if (newSet.has(status)) {
+		newSet.delete(status);
+	} else {
+		newSet.add(status);
+	}
+	selectedStatuses = newSet;
+}
+
+function toggleProjectType(projectType: string) {
+	const newSet = new Set(selectedProjectTypes);
+	if (newSet.has(projectType)) {
+		newSet.delete(projectType);
+	} else {
+		newSet.add(projectType);
+	}
+	selectedProjectTypes = newSet;
+}
+
+function formatProjectType(type: string): string {
+	return type.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
 </script>
 
 <svelte:head>
 	<title>Admin Panel - Midnight</title>
 </svelte:head>
 
-<div class="min-h-screen bg-gradient-to-br from-gray-950 via-purple-950 to-gray-900 text-white p-6">
+<div class="min-h-screen bg-gray-950 text-white p-6">
 	<div class="max-w-7xl mx-auto space-y-8">
 		<header class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
 			<div>
@@ -579,7 +716,7 @@ let statusCounts = $derived({
 			</div>
 		</header>
 
-		<section class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+		<section class="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
 			<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-2">
 				<p class="text-sm text-gray-400 uppercase tracking-wide">Total Hackatime Hours</p>
 				<p class="text-3xl font-bold text-white">{formatTotalHoursValue(metrics.totalHackatimeHours)}</p>
@@ -587,6 +724,10 @@ let statusCounts = $derived({
 			<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-2">
 				<p class="text-sm text-gray-400 uppercase tracking-wide">Total Approved Hours</p>
 				<p class="text-3xl font-bold text-white">{formatTotalHoursValue(metrics.totalApprovedHours)}</p>
+			</div>
+			<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-2">
+				<p class="text-sm text-gray-400 uppercase tracking-wide">Submitted Projects Hours</p>
+				<p class="text-3xl font-bold text-white">{formatTotalHoursValue(metrics.totalSubmittedHackatimeHours)}</p>
 			</div>
 			<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-2">
 				<p class="text-sm text-gray-400 uppercase tracking-wide">Projects</p>
@@ -636,38 +777,154 @@ let statusCounts = $derived({
 					</button>
 				</div>
 
-				<div class="flex flex-wrap gap-2">
-					<button
-						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'all' ? 'bg-purple-600 border-purple-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
-						onclick={() => statusFilter = 'all'}
-					>
-						All ({statusCounts.all})
-					</button>
-					<button
-						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'pending' ? 'bg-yellow-600 border-yellow-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
-						onclick={() => statusFilter = 'pending'}
-					>
-						Pending ({statusCounts.pending})
-					</button>
-					<button
-						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'approved' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
-						onclick={() => statusFilter = 'approved'}
-					>
-						Approved ({statusCounts.approved})
-					</button>
-					<button
-						class={`px-4 py-2 rounded-lg border transition-colors ${statusFilter === 'rejected' ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-700 hover:bg-gray-700'}`}
-						onclick={() => statusFilter = 'rejected'}
-					>
-						Rejected ({statusCounts.rejected})
-					</button>
+				<div class="rounded-2xl border border-gray-700 bg-gray-900/70 backdrop-blur p-6 space-y-6">
+					<div class="grid gap-4 md:grid-cols-2">
+						<div>
+							<div class="text-sm font-medium text-gray-300 mb-2">Date Range for Billy Links</div>
+							<div class="flex flex-col gap-3 md:flex-row md:items-end md:gap-4">
+								<div class="flex-1">
+									<label for="date-range-start" class="block text-xs text-gray-400 mb-1">Start Date</label>
+									<input
+										id="date-range-start"
+										type="date"
+										class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+										bind:value={dateRangeStart}
+									/>
+								</div>
+								<div class="flex-1">
+									<label for="date-range-end" class="block text-xs text-gray-400 mb-1">End Date</label>
+									<input
+										id="date-range-end"
+										type="date"
+										class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+										bind:value={dateRangeEnd}
+									/>
+								</div>
+								<div>
+									<button
+										class="px-4 py-2 rounded-lg border border-gray-600 bg-gray-800 text-gray-400 text-sm hover:bg-gray-700 transition-colors whitespace-nowrap"
+										onclick={() => {
+											const defaultRange = getDefaultDateRange();
+											dateRangeStart = defaultRange.startDate;
+											dateRangeEnd = defaultRange.endDate;
+										}}
+									>
+										Reset
+									</button>
+								</div>
+							</div>
+						</div>
+
+						<div>
+							<label for="search-submissions" class="block text-sm font-medium text-gray-300 mb-2">Search</label>
+							<input
+								id="search-submissions"
+								type="text"
+								placeholder="Search by project title, user name, email, or description..."
+								class="w-full rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+								bind:value={searchQuery}
+							/>
+						</div>
+					</div>
+
+					<div class="grid gap-4 md:grid-cols-3">
+						<div>
+							<div class="block text-sm font-medium text-gray-300 mb-2">Filter by Status</div>
+							<div class="flex flex-wrap gap-2">
+								{#each statusOptions as status}
+									<button
+										class={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+											selectedStatuses.has(status)
+												? status === 'pending'
+													? 'bg-yellow-600 border-yellow-400 text-white'
+													: status === 'approved'
+													? 'bg-green-600 border-green-400 text-white'
+													: 'bg-red-600 border-red-400 text-white'
+												: 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
+										}`}
+										onclick={() => toggleStatus(status)}
+									>
+										{status.charAt(0).toUpperCase() + status.slice(1)}
+										{#if selectedStatuses.has(status)}
+											<span class="ml-1">✓</span>
+										{/if}
+									</button>
+								{/each}
+								{#if selectedStatuses.size > 0}
+									<button
+										class="px-3 py-1.5 rounded-lg border border-gray-600 bg-gray-800 text-gray-400 text-sm hover:bg-gray-700 transition-colors"
+										onclick={() => selectedStatuses = new Set()}
+									>
+										Clear
+									</button>
+								{/if}
+							</div>
+						</div>
+
+						<div>
+							<div class="block text-sm font-medium text-gray-300 mb-2">Filter by Project Type</div>
+							<div class="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+								{#each projectTypes as projectType}
+									<button
+										class={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+											selectedProjectTypes.has(projectType)
+												? 'bg-purple-600 border-purple-400 text-white'
+												: 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
+										}`}
+										onclick={() => toggleProjectType(projectType)}
+									>
+										{formatProjectType(projectType)}
+										{#if selectedProjectTypes.has(projectType)}
+											<span class="ml-1">✓</span>
+										{/if}
+									</button>
+								{/each}
+								{#if selectedProjectTypes.size > 0}
+									<button
+										class="px-3 py-1.5 rounded-lg border border-gray-600 bg-gray-800 text-gray-400 text-sm hover:bg-gray-700 transition-colors"
+										onclick={() => selectedProjectTypes = new Set()}
+									>
+										Clear
+									</button>
+								{/if}
+							</div>
+						</div>
+
+						<div>
+							<div class="block text-sm font-medium text-gray-300 mb-2">Sort By</div>
+							<div class="flex gap-2">
+								<select
+									class="flex-1 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+									bind:value={sortField}
+								>
+									<option value="createdAt">Date Created</option>
+									<option value="projectTitle">Project Title</option>
+									<option value="userName">User Name</option>
+									<option value="approvalStatus">Status</option>
+									<option value="nowHackatimeHours">Hackatime Hours</option>
+									<option value="approvedHours">Approved Hours</option>
+								</select>
+								<button
+									class="px-3 py-2 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-white transition-colors"
+									onclick={() => sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'}
+									title={sortDirection === 'asc' ? 'Sort ascending' : 'Sort descending'}
+								>
+									{sortDirection === 'asc' ? '↑' : '↓'}
+								</button>
+							</div>
+						</div>
+					</div>
+
+					<div class="text-sm text-gray-400">
+						Showing {filteredSubmissions.length} of {submissions.length} submissions
+					</div>
 				</div>
 
 				{#if submissionsLoading}
 					<div class="py-12 text-center text-gray-300">Loading submissions...</div>
 				{:else if filteredSubmissions.length === 0}
 					<div class="py-12 text-center text-gray-300">
-						{statusFilter === 'all' ? 'No submissions available.' : `No ${statusFilter} submissions.`}
+						No submissions match your filters.
 					</div>
 				{:else}
 					<div class="grid gap-6">
@@ -818,6 +1075,26 @@ let statusCounts = $derived({
 													📸 Full Screenshot
 												</a>
 											{/if}
+											{#each [submission] as _}
+												{@const billyLinkResult = generateBillyLink(submission.project.user.hackatimeAccount)}
+												{#if billyLinkResult}
+													<a 
+														href={billyLinkResult} 
+														target="_blank" 
+														rel="noreferrer"
+														class="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-500 border border-green-400 text-white text-sm transition-colors"
+													>
+														Billy
+													</a>
+												{:else}
+													<span 
+														class="px-4 py-2 rounded-lg bg-gray-600 border border-gray-500 text-gray-400 text-sm cursor-not-allowed"
+														title="Hackatime account not available"
+													>
+														Billy
+													</span>
+												{/if}
+											{/each}
 										</div>
 									</div>
 								</div>

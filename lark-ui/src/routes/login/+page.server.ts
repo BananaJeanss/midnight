@@ -35,7 +35,7 @@ export const actions = {
 
         if (!response || !response.ok) {
             const urlParams = new URLSearchParams();
-            urlParams.set("error", responseData.message);
+            urlParams.set("error", responseData.error || responseData.message || 'An error occurred');
             return redirect(302, `/login?${urlParams.toString()}`);
         }
 

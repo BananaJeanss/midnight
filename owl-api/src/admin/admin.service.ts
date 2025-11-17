@@ -52,6 +52,7 @@ export class AdminService {
                 state: true,
                 country: true,
                 zipCode: true,
+                hackatimeAccount: true,
                 airtableRecId: true,
                 createdAt: true,
                 updatedAt: true,
@@ -235,57 +236,57 @@ export class AdminService {
       },
     });
 
-    try {
-      // Prioritize project.repoUrl over submission.repoUrl to ensure we get the GitHub URL
-      // submission.repoUrl might contain playable URLs incorrectly
-      const repoUrl = submission.project.repoUrl || submission.repoUrl || '';
-      const playableUrl = submission.playableUrl || submission.project.playableUrl || '';
-      
-      console.log('Admin service - submission.repoUrl:', submission.repoUrl);
-      console.log('Admin service - submission.project.repoUrl:', submission.project.repoUrl);
-      console.log('Admin service - final repoUrl being passed:', repoUrl);
-      console.log('Admin service - playableUrl being passed:', playableUrl);
-      
-      const approvedProjectData = {
-        user: {
-          firstName: submission.project.user.firstName,
-          lastName: submission.project.user.lastName,
-          email: submission.project.user.email,
-          birthday: submission.project.user.birthday,
-          addressLine1: submission.project.user.addressLine1,
-          addressLine2: submission.project.user.addressLine2,
-          city: submission.project.user.city,
-          state: submission.project.user.state,
-          country: submission.project.user.country,
-          zipCode: submission.project.user.zipCode,
-        },
-        project: {
-          playableUrl: playableUrl,
-          repoUrl: repoUrl,
-          screenshotUrl: submission.screenshotUrl || submission.project.screenshotUrl || '',
-          approvedHours: hackatimeHours,
-          hoursJustification: hoursJustification,
-          description: submission.project.description || submission.description || undefined,
-        },
-      };
+    if (!submission.project.airtableRecId) {
+      try {
+        // Prioritize project.repoUrl over submission.repoUrl to ensure we get the GitHub URL
+        // submission.repoUrl might contain playable URLs incorrectly
+        const repoUrl = submission.project.repoUrl || submission.repoUrl || '';
+        const playableUrl = submission.playableUrl || submission.project.playableUrl || '';
+        
+        console.log('Admin service - submission.repoUrl:', submission.repoUrl);
+        console.log('Admin service - submission.project.repoUrl:', submission.project.repoUrl);
+        console.log('Admin service - final repoUrl being passed:', repoUrl);
+        console.log('Admin service - playableUrl being passed:', playableUrl);
+        
+        const approvedProjectData = {
+          user: {
+            firstName: submission.project.user.firstName,
+            lastName: submission.project.user.lastName,
+            email: submission.project.user.email,
+            birthday: submission.project.user.birthday,
+            addressLine1: submission.project.user.addressLine1,
+            addressLine2: submission.project.user.addressLine2,
+            city: submission.project.user.city,
+            state: submission.project.user.state,
+            country: submission.project.user.country,
+            zipCode: submission.project.user.zipCode,
+          },
+          project: {
+            playableUrl: playableUrl,
+            repoUrl: repoUrl,
+            screenshotUrl: submission.screenshotUrl || submission.project.screenshotUrl || '',
+            approvedHours: hackatimeHours,
+            hoursJustification: hoursJustification,
+            description: submission.project.description || submission.description || undefined,
+          },
+        };
 
-      const airtableResult = await this.airtableService.createApprovedProject(approvedProjectData);
+        const airtableResult = await this.airtableService.createApprovedProject(approvedProjectData);
 
-      if (!submission.project.user.airtableRecId) {
-        await this.prisma.user.update({
-          where: { userId: submission.project.userId },
-          data: { airtableRecId: airtableResult.recordId },
-        });
-      }
+        if (!submission.project.user.airtableRecId) {
+          await this.prisma.user.update({
+            where: { userId: submission.project.userId },
+            data: { airtableRecId: airtableResult.recordId },
+          });
+        }
 
-      if (!submission.project.airtableRecId) {
         await this.prisma.project.update({
           where: { projectId: submission.projectId },
           data: { airtableRecId: airtableResult.recordId },
         });
+      } catch (error) {
+        console.error('Error creating Approved Projects record in Airtable:', error);
       }
-    } catch (error) {
-      console.error('Error creating Approved Projects record in Airtable:', error);
     }
 
     return updatedSubmission;
@@ -613,7 +614,7 @@ export class AdminService {
   }
 
   async getTotals() {
-    const [hackatimeAggregate, approvedAggregate, totalUsers, totalProjects] = await Promise.all([
+    const [hackatimeAggregate, approvedAggregate, totalUsers, totalProjects, submittedProjects] = await Promise.all([
       this.prisma.project.aggregate({
         _sum: { nowHackatimeHours: true },
       }),
@@ -623,7 +624,22 @@ export class AdminService {
       }),
       this.prisma.user.count(),
       this.prisma.project.count(),
+      this.prisma.project.findMany({
+        where: {
+          submissions: {
+            some: {},
+          },
+        },
+        select: {
+          nowHackatimeHours: true,
+        },
+      }),
     ]);
+
+    const totalSubmittedHackatimeHours = submittedProjects.reduce(
+      (sum, project) => sum + (project.nowHackatimeHours ?? 0),
+      0,
+    );
 
     return {
       totals: {
@@ -631,6 +647,7 @@ export class AdminService {
         totalApprovedHours: approvedAggregate._sum.approvedHours ?? 0,
         totalUsers,
         totalProjects,
+        totalSubmittedHackatimeHours,
       },
     };
   }

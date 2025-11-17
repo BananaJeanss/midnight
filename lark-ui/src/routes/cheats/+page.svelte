@@ -97,7 +97,7 @@
         step = 'otp';
         message = 'OTP sent to your email';
       } else {
-        error = data.message || 'Failed to send OTP';
+        error = data.error || data.message || 'Failed to send OTP';
       }
     } catch (err) {
       error = 'Network error';
@@ -133,7 +133,7 @@
           message = 'Please complete your profile';
         }
       } else {
-        error = data.message || 'Invalid OTP';
+        error = data.error || data.message || 'Invalid OTP';
       }
     } catch (err) {
       error = 'Network error';
@@ -165,7 +165,7 @@
         message = 'Profile completed successfully';
         await loadProjects();
       } else {
-        error = data.message || 'Failed to complete profile';
+        error = data.error || data.message || 'Failed to complete profile';
       }
     } catch (err) {
       error = 'Network error';
@@ -197,7 +197,7 @@
         projectType = '';
         message = 'Project created successfully';
       } else {
-        error = data.message || 'Failed to create project';
+        error = data.error || data.message || 'Failed to create project';
       }
     } catch (err) {
       error = 'Network error';
@@ -229,7 +229,7 @@
         message = 'Submission created successfully! Data copied from project.';
         await loadSubmissions();
       } else {
-        error = data.message || 'Failed to create submission';
+        error = data.error || data.message || 'Failed to create submission';
       }
     } catch (err) {
       error = 'Network error';
@@ -312,7 +312,7 @@
       if (response.ok) {
         message = `Onboarding completed! Status: ${data.user.onboardComplete}`;
       } else {
-        error = data.message || 'Failed to complete onboarding';
+        error = data.error || data.message || 'Failed to complete onboarding';
       }
     } catch (err) {
       error = 'Network error';
@@ -336,7 +336,7 @@
       if (response.ok) {
         message = `Onboarding status: ${data.onboardComplete ? 'Completed' : 'Not completed'}`;
       } else {
-        error = data.message || 'Failed to get onboarding status';
+        error = data.error || data.message || 'Failed to get onboarding status';
       }
     } catch (err) {
       error = 'Network error';
@@ -372,7 +372,7 @@
         createUserFirstName = '';
         createUserLastName = '';
       } else {
-        error = data.message || 'Failed to create user';
+        error = data.error || data.message || 'Failed to create user';
       }
     } catch (err) {
       error = 'Network error';
@@ -420,7 +420,7 @@
         updateUserCountry = '';
         updateUserZipCode = '';
       } else {
-        error = data.message || 'Failed to update user';
+        error = data.error || data.message || 'Failed to update user';
       }
     } catch (err) {
       error = 'Network error';
@@ -455,7 +455,7 @@
       const data = await response.json();
       
       if (response.ok) {
-        message = data.message || `Edit request created successfully. Waiting for admin approval.`;
+        message = data.message || data.error || `Edit request created successfully. Waiting for admin approval.`;
         // Clear form fields
         editProjectId = '';
         editProjectTitle = '';
@@ -468,7 +468,7 @@
         await loadProjects();
         await loadEditRequests();
       } else {
-        error = data.message || 'Failed to create edit request';
+        error = data.error || data.message || 'Failed to create edit request';
       }
     } catch (err) {
       error = 'Network error';
